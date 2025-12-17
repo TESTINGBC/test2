@@ -1,0 +1,33 @@
+{
+  "name": "mj_generatedactions",
+  "version": "1.0.0",
+  "description": "Generated action subclasses maintained by the CodeGen utility.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "private": true,
+  "files": [
+    "/dist"
+  ],
+  "scripts": {
+    "start": "ts-node-dev src/index.ts",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "MemberJunction.com",
+  "license": "ISC",
+  "devDependencies": {
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@memberjunction/actions-base": "2.126.0",
+    "@memberjunction/actions": "2.126.0",
+    "@memberjunction/global": "2.126.0",
+    "@memberjunction/core": "2.126.0",
+    "@memberjunction/core-entities": "2.126.0",
+    "@memberjunction/core-entities-server": "2.126.0",
+    "@memberjunction/ai": "2.126.0",
+    "@memberjunction/aiengine": "2.126.0",
+    "zod": "^3.23.8"
+  }
+}

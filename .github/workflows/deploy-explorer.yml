@@ -1,0 +1,229 @@
+# Deploy MJExplorer to Azure Static Web Apps
+# This workflow builds and deploys the Angular admin UI to Azure
+# Configured automatically by MJ Central with environment-specific credentials
+
+name: Deploy MJExplorer
+
+on:
+  push:
+    # Triggers on all branches - customize this list for your environments
+    # MJ Central provisions branches based on your environment names
+    # Examples:
+    #   - For dev/staging/prod: branches: ["dev", "staging", "prod"]
+    #   - For preview/live: branches: ["preview", "live"]
+    #   - For all branches: branches: ["**"]
+    # Recommendation: Start with ["**"], then restrict to specific branches after testing
+    branches: ["**"]
+    paths:
+      - "apps/MJExplorer/**"
+      - "packages/GeneratedEntities/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment suffix (e.g., DEV, STAGE, PROD)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write  # Required for Azure login
+
+jobs:
+  # Check if this branch has a provisioned Azure environment
+  # Skips all jobs if no AZURE_CREDENTIALS_{env} secret exists
+  check-env:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+      branch_env: ${{ steps.check.outputs.branch_env }}
+    steps:
+      - name: Determine environment suffix
+        id: env
+        run: |
+          if [ -n "${{ inputs.environment }}" ]; then
+            BRANCH_ENV="${{ inputs.environment }}"
+          else
+            # Transform branch name: replace -/./space with underscore, uppercase
+            # Examples: "dev" -> "DEV", "prod-east" -> "PROD_EAST", "staging" -> "STAGING"
+            BRANCH_ENV=$(echo "${{ github.ref_name }}" | tr '[:lower:]' '[:upper:]' | tr -- '-. ' '___')
+          fi
+          echo "BRANCH_ENV=$BRANCH_ENV" >> $GITHUB_OUTPUT
+          echo "Using environment suffix: $BRANCH_ENV"
+
+      - name: Check if environment is provisioned
+        id: check
+        run: |
+          if [ -n "${{ secrets[format('AZURE_CREDENTIALS_{0}', steps.env.outputs.BRANCH_ENV)] }}" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "Environment ${{ steps.env.outputs.BRANCH_ENV }} is provisioned - proceeding with deployment"
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "Environment ${{ steps.env.outputs.BRANCH_ENV }} not provisioned - skipping deployment"
+            echo "To deploy this branch, provision an environment in MJ Central first"
+          fi
+          echo "branch_env=${{ steps.env.outputs.BRANCH_ENV }}" >> $GITHUB_OUTPUT
+
+  build-and-deploy:
+    needs: check-env
+    if: needs.check-env.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    name: Build and Deploy MJExplorer
+    environment:
+      name: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build GeneratedEntities (required by Explorer)
+        run: npm run build:packages
+
+      - name: Generate environment configuration
+        run: |
+          # Generate environment.ts using GitHub variables/secrets provisioned by MJ Central
+          # CLIENT_ID comes from Terraform variable, TENANT_ID from AZURE_CREDENTIALS secret
+
+          API_URL="${{ vars[format('API_URL_{0}', needs.check-env.outputs.branch_env)] }}"
+          EXPLORER_URL="${{ vars[format('EXPLORER_URL_{0}', needs.check-env.outputs.branch_env)] }}"
+          CLIENT_ID="${{ vars[format('CLIENT_ID_{0}', needs.check-env.outputs.branch_env)] }}"
+
+          # Extract tenantId from AZURE_CREDENTIALS secret (JSON format)
+          TENANT_ID=$(echo '${{ secrets[format('AZURE_CREDENTIALS_{0}', needs.check-env.outputs.branch_env)] }}' | jq -r '.tenantId')
+
+          # Validate required variables
+          if [ -z "$API_URL" ]; then
+            echo "::error::Missing required variable: API_URL_${{ needs.check-env.outputs.branch_env }}"
+            echo "Ensure MJ Central has provisioned this environment"
+            exit 1
+          fi
+
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::Missing required variable: CLIENT_ID_${{ needs.check-env.outputs.branch_env }}"
+            echo "Ensure MJ Central has provisioned this environment"
+            exit 1
+          fi
+
+          if [ -z "$TENANT_ID" ] || [ "$TENANT_ID" == "null" ]; then
+            echo "::error::Failed to extract tenantId from AZURE_CREDENTIALS_${{ needs.check-env.outputs.branch_env }}"
+            exit 1
+          fi
+
+          # Convert HTTP URL to WebSocket URL
+          WS_URL=$(echo "$API_URL" | sed 's/^https:/wss:/' | sed 's/^http:/ws:/')
+
+          # Derive CLIENT_AUTHORITY from TENANT_ID
+          CLIENT_AUTHORITY="https://login.microsoftonline.com/${TENANT_ID}"
+
+          # Determine if this is a production-like environment for Angular's production flag
+          IS_PRODUCTION="false"
+          if [[ "${{ needs.check-env.outputs.branch_env }}" == *"PROD"* ]] || [[ "${{ needs.check-env.outputs.branch_env }}" == *"LIVE"* ]] || [[ "${{ needs.check-env.outputs.branch_env }}" == *"RELEASE"* ]]; then
+            IS_PRODUCTION="true"
+          fi
+
+          echo "Generating environment.ts for environment: ${{ needs.check-env.outputs.branch_env }}"
+          echo "  API URL: $API_URL"
+          echo "  WebSocket URL: $WS_URL"
+          echo "  Explorer URL: $EXPLORER_URL"
+          echo "  Client ID: $CLIENT_ID"
+          echo "  Tenant ID: $TENANT_ID"
+          echo "  Production mode: $IS_PRODUCTION"
+
+          # Generate the environment.ts file
+          cat > apps/MJExplorer/src/environments/environment.ts << EOF
+          // Auto-generated by deploy-explorer.yml workflow
+          // Environment: ${{ needs.check-env.outputs.branch_env }}
+          // Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          export const environment = {
+            // API Configuration - Provisioned by MJ Central
+            GRAPHQL_URI: "${API_URL}/",
+            GRAPHQL_WS_URI: "${WS_URL}/",
+            REDIRECT_URI: "${EXPLORER_URL}/",
+
+            // Authentication - Auto-provisioned by MJ Central (Azure AD)
+            CLIENT_ID: "${CLIENT_ID}",
+            TENANT_ID: "${TENANT_ID}",
+            CLIENT_AUTHORITY: "${CLIENT_AUTHORITY}",
+            AUTH_TYPE: "MSAL",
+            AUTH0_DOMAIN: "",
+            AUTH0_CLIENTID: "",
+
+            // MemberJunction Configuration
+            MJ_CORE_SCHEMA_NAME: "__mj",
+            APPLICATION_NAME: "MemberJunction",
+            APPLICATION_INSTANCE: "${{ needs.check-env.outputs.branch_env }}",
+
+            // Runtime Configuration
+            NODE_ENV: ${IS_PRODUCTION} ? "production" : "development",
+            production: ${IS_PRODUCTION},
+
+            // UI Configuration
+            AUTOSAVE_DEBOUNCE_MS: 1200,
+            SEARCH_DEBOUNCE_MS: 800,
+            MIN_SEARCH_LENGTH: 3
+          };
+          EOF
+
+          echo "Generated environment.ts:"
+          cat apps/MJExplorer/src/environments/environment.ts
+
+      - name: Build MJExplorer
+        run: |
+          cd apps/MJExplorer
+          # Always build with production configuration for optimizations
+          # Environment-specific values are already injected into environment.ts
+          npm run build -- --configuration production
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets[format('AZURE_CREDENTIALS_{0}', needs.check-env.outputs.branch_env)] }}
+
+      - name: Get Static Web App deployment token
+        id: swa-token
+        run: |
+          # Fetch deployment token from Azure
+          RESOURCE_GROUP="${{ vars[format('RESOURCE_GROUP_{0}', needs.check-env.outputs.branch_env)] }}"
+          SWA_NAME="${{ vars[format('EXPLORER_APP_NAME_{0}', needs.check-env.outputs.branch_env)] }}"
+
+          echo "Fetching deployment token for Static Web App: $SWA_NAME"
+
+          TOKEN=$(az staticwebapp secrets list \
+            --name "$SWA_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.apiKey" \
+            --output tsv)
+
+          # Mask token in logs
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Deploy to Azure Static Web Apps
+        id: deploy-swa
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa-token.outputs.token }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: "upload"
+          app_location: "apps/MJExplorer/dist/MJExplorer"
+          output_location: ""
+          skip_app_build: true # Already built in previous step
+
+      - name: Deployment complete
+        run: |
+          echo "MJExplorer deployed successfully!"
+          echo "URL: ${{ steps.deploy-swa.outputs.static_web_app_url }}"
+
+      - name: Logout from Azure
+        if: always()
+        run: |
+          az logout || true

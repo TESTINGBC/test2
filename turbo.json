@@ -1,0 +1,23 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["APP_ENV", "NODE_OPTIONS"],
+  "tasks": {
+    "build": {
+      "outputs": ["build/**", "dist/**"],
+      "cache": true,
+      "dependsOn": ["^build"],
+      "persistent": false
+    },
+    "start": {
+      "cache": false,
+      "persistent": true
+    },
+    "watch": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "outputs": []
+    }
+  }
+}

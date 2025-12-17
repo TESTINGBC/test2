@@ -1,0 +1,185 @@
+# MemberJunction Version Upgrade
+# Upgrades all @memberjunction/* packages to a specified version
+# Then triggers mj-setup.yml to run migrations and codegen with the new version
+#
+# Usage:
+#   1. Go to Actions tab > MJ Upgrade > Run workflow
+#   2. Enter environment suffix (e.g., DEV, STAGING, PROD)
+#   3. Enter target MJ version (e.g., 2.85.0) or "latest"
+#   4. Workflow will bump packages, commit, then trigger mj-setup
+
+name: MJ Upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment suffix (e.g., DEV, STAGE, PROD)"
+        required: true
+        type: string
+      mj_version:
+        description: "Target MJ version (e.g., 2.85.0 or latest)"
+        required: true
+        type: string
+        default: "latest"
+      trigger_setup:
+        description: "Trigger mj-setup workflow after upgrade?"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # Required for committing changes
+  actions: write   # Required for triggering other workflows
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set environment suffix
+        id: env
+        run: |
+          BRANCH_ENV="${{ inputs.environment }}"
+          echo "BRANCH_ENV=$BRANCH_ENV" >> $GITHUB_OUTPUT
+          echo "Using environment suffix: $BRANCH_ENV"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Determine and validate target version
+        id: version
+        run: |
+          TARGET_VERSION="${{ inputs.mj_version }}"
+
+          # Get current version (strip ^ or ~ prefix)
+          CURRENT_VERSION=$(node -e "const v = require('./package.json').dependencies['@memberjunction/cli'] || '0.0.0'; console.log(v.replace(/^[\^~]/, ''))")
+
+          # Get latest available version from npm
+          LATEST_VERSION=$(npm view @memberjunction/cli version)
+
+          if [ "$TARGET_VERSION" == "latest" ]; then
+            TARGET_VERSION="$LATEST_VERSION"
+            echo "Resolved 'latest' to version: $TARGET_VERSION"
+          fi
+
+          # Strip leading 'v' if present
+          TARGET_VERSION="${TARGET_VERSION#v}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Target version: $TARGET_VERSION"
+          echo "Latest available: $LATEST_VERSION"
+
+          # Validate: current < target <= latest
+          node -e "
+            const compare = (a, b) => {
+              const [a1, a2, a3] = a.split('.').map(Number);
+              const [b1, b2, b3] = b.split('.').map(Number);
+              if (a1 !== b1) return a1 - b1;
+              if (a2 !== b2) return a2 - b2;
+              return a3 - b3;
+            };
+
+            const current = '$CURRENT_VERSION';
+            const target = '$TARGET_VERSION';
+            const latest = '$LATEST_VERSION';
+
+            if (compare(target, current) <= 0) {
+              console.error('Error: Target version (' + target + ') must be greater than current version (' + current + ')');
+              process.exit(1);
+            }
+
+            if (compare(target, latest) > 0) {
+              console.error('Error: Target version (' + target + ') exceeds latest available version (' + latest + ')');
+              process.exit(1);
+            }
+
+            console.log('Version validation passed');
+          "
+
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "target=$TARGET_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Bump MJ packages
+        run: |
+          echo "=== Bumping @memberjunction/* packages to v${{ steps.version.outputs.target }} ==="
+          npx @memberjunction/cli bump -r -t ${{ steps.version.outputs.target }}
+
+      - name: Install dependencies (update lock file)
+        run: |
+          echo "=== Updating package-lock.json ==="
+          npm install
+
+      - name: Display new MJ version
+        run: |
+          echo "=== New MJ Version ==="
+          node -e "console.log(require('./package.json').dependencies['@memberjunction/cli'] || 'Not found')"
+
+      - name: Commit package changes
+        id: commit
+        run: |
+          echo "=== Committing Package Changes ==="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Add all package.json files and lock file
+          git add "**/package.json" package-lock.json
+
+          # Only commit if there are staged changes
+          if git diff --staged --quiet; then
+            echo "No package changes to commit - already at target version?"
+            echo "skipped=true" >> $GITHUB_OUTPUT
+          else
+            git commit -m "chore: upgrade MemberJunction to v${{ steps.version.outputs.target }}
+
+          Environment: ${{ steps.env.outputs.BRANCH_ENV }}
+
+          [skip ci]"
+            git push
+            echo "Package changes committed and pushed"
+            echo "skipped=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upgrade Summary
+        run: |
+          echo "=========================================="
+          echo "MJ Upgrade Complete"
+          echo "=========================================="
+          echo ""
+          echo "Target version: v${{ steps.version.outputs.target }}"
+          echo "Environment: ${{ steps.env.outputs.BRANCH_ENV }}"
+          if [ "${{ steps.commit.outputs.skipped }}" == "true" ]; then
+            echo ""
+            echo "No changes - packages were already at target version"
+          else
+            echo "Package.json files updated and committed"
+          fi
+
+      - name: Trigger MJ Setup workflow
+        if: inputs.trigger_setup == true && steps.commit.outputs.skipped != 'true'
+        run: |
+          echo ""
+          echo "==========================================="
+          echo "Triggering MJ Setup Workflow"
+          echo "==========================================="
+          echo ""
+          echo "This will run migrations and codegen with the new MJ version."
+          echo ""
+
+          gh workflow run mj-setup.yml \
+            --ref ${{ github.ref_name }} \
+            -f environment=${{ steps.env.outputs.BRANCH_ENV }} \
+            -f commit_generated_code=true \
+            -f trigger_deploy=true
+
+          echo ""
+          echo "MJ Setup workflow triggered"
+          echo "Check Actions tab for progress"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

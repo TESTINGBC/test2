@@ -1,0 +1,41 @@
+{
+  "name": "memberjunction-template",
+  "version": "1.0.0",
+  "repository": "https://github.com/MJ-Central/template",
+  "type": "module",
+  "keywords": [],
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "packageManager": "npm@11.2.0",
+  "scripts": {
+    "turbo": "turbo",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "build:packages": "turbo build --filter './packages/**'",
+    "build:api": "turbo --log-order=stream build --filter=\"mj_api\"",
+    "build:explorer": "turbo --log-order=stream build --filter=\"mj_explorer\"",
+
+    "start:api": "npm run env -- npm run start --workspace=apps/MJAPI",
+    "start:prod": "npm run start:prod --workspace=apps/MJAPI",
+    "start:explorer": "npm run start --workspace=apps/MJExplorer",
+
+    "codegen": "npm run env -- mj codegen",
+    "migrate": "npm run env -- mj migrate --tag=main",
+    "db": "npm run env -- node tools/flyway/db-migrate.js",
+
+    "env": "dotenvx run -f .env.local --"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.33.0",
+    "@memberjunction/cli": "2.126.0",
+    "@memberjunction/global": "2.126.0",
+    "@memberjunction/ng-auth-services": "2.126.0",
+    "turbo": "^2.6.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

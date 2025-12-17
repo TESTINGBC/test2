@@ -1,0 +1,225 @@
+# Run Database Schema Migrations
+# This workflow executes Flyway migrations when SQL schema files change
+# Uses MJ Central provisioned database credentials
+
+name: Schema Migration
+
+on:
+  push:
+    # Triggers on all branches - customize this list for your environments
+    # MJ Central provisions branches based on your environment names
+    # Examples:
+    #   - For dev/staging/prod: branches: ["dev", "staging", "prod"]
+    #   - For preview/live: branches: ["preview", "live"]
+    #   - For all branches: branches: ["**"]
+    # Recommendation: Start with ["**"], then restrict to specific branches after testing
+    branches: ["**"]
+    paths:
+      - "SQL Scripts/migrations/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment suffix (e.g., DEV, STAGE, PROD)"
+        required: true
+        type: string
+      commit_generated_code:
+        description: "Commit generated code changes to repository?"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # Required for committing generated code
+  actions: write   # Required for triggering other workflows
+
+jobs:
+  # Check if this branch has a provisioned Azure environment
+  # Skips all jobs if no DB_HOST_{env} secret exists
+  check-env:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+      branch_env: ${{ steps.check.outputs.branch_env }}
+    steps:
+      - name: Determine environment suffix
+        id: env
+        run: |
+          if [ -n "${{ inputs.environment }}" ]; then
+            BRANCH_ENV="${{ inputs.environment }}"
+          else
+            # Transform branch name: replace -/./space with underscore, uppercase
+            # Examples: "dev" -> "DEV", "prod-east" -> "PROD_EAST", "staging" -> "STAGING"
+            BRANCH_ENV=$(echo "${{ github.ref_name }}" | tr '[:lower:]' '[:upper:]' | tr -- '-. ' '___')
+          fi
+          echo "BRANCH_ENV=$BRANCH_ENV" >> $GITHUB_OUTPUT
+          echo "Using environment suffix: $BRANCH_ENV"
+
+      - name: Check if environment is provisioned
+        id: check
+        run: |
+          if [ -n "${{ secrets[format('DB_HOST_{0}', steps.env.outputs.BRANCH_ENV)] }}" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+            echo "Environment ${{ steps.env.outputs.BRANCH_ENV }} is provisioned - proceeding with migration"
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "Environment ${{ steps.env.outputs.BRANCH_ENV }} not provisioned - skipping migration"
+            echo "To run migrations for this branch, provision an environment in MJ Central first"
+          fi
+          echo "branch_env=${{ steps.env.outputs.BRANCH_ENV }}" >> $GITHUB_OUTPUT
+
+  migrate:
+    needs: check-env
+    if: needs.check-env.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set database connection info
+        id: db
+        run: |
+          # Get individual database secrets provisioned by MJ Central
+          DB_HOST="${{ secrets[format('DB_HOST_{0}', needs.check-env.outputs.branch_env)] }}"
+          DB_DATABASE="${{ secrets[format('DB_DATABASE_{0}', needs.check-env.outputs.branch_env)] }}"
+          DB_USERNAME="${{ secrets[format('DB_USERNAME_{0}', needs.check-env.outputs.branch_env)] }}"
+          DB_PASSWORD="${{ secrets[format('DB_PASSWORD_{0}', needs.check-env.outputs.branch_env)] }}"
+
+          # Validate secrets exist
+          if [ -z "$DB_HOST" ] || [ -z "$DB_DATABASE" ] || [ -z "$DB_USERNAME" ] || [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Missing database secrets for environment ${{ needs.check-env.outputs.branch_env }}"
+            echo "Expected secrets: DB_HOST_${{ needs.check-env.outputs.branch_env }}, DB_DATABASE_${{ needs.check-env.outputs.branch_env }}, DB_USERNAME_${{ needs.check-env.outputs.branch_env }}, DB_PASSWORD_${{ needs.check-env.outputs.branch_env }}"
+            echo "Ensure MJ Central has provisioned this environment"
+            exit 1
+          fi
+
+          echo "Database connection configured"
+          echo "  Host: $DB_HOST"
+          echo "  Database: $DB_DATABASE"
+          echo "  Username: $DB_USERNAME"
+
+          # Mask sensitive values
+          echo "::add-mask::$DB_PASSWORD"
+
+          # Export as outputs for subsequent steps
+          echo "host=$DB_HOST" >> $GITHUB_OUTPUT
+          echo "port=1433" >> $GITHUB_OUTPUT
+          echo "database=$DB_DATABASE" >> $GITHUB_OUTPUT
+          echo "username=$DB_USERNAME" >> $GITHUB_OUTPUT
+          echo "password=$DB_PASSWORD" >> $GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Flyway CLI
+        run: |
+          wget -qO- https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/9.22.3/flyway-commandline-9.22.3-linux-x64.tar.gz | tar xvz
+          # Remove default config files to avoid placeholder issues
+          rm -f flyway-9.22.3/conf/*.conf flyway-9.22.3/conf/*.toml 2>/dev/null || true
+          sudo ln -s $(pwd)/flyway-9.22.3/flyway /usr/local/bin/flyway
+          flyway --version
+
+      - name: Run Custom Schema Migrations (Flyway)
+        run: |
+          echo "=== Running Custom Schema Migrations (Flyway) ==="
+          node tools/flyway/db-migrate.js
+        env:
+          DB_HOST: ${{ steps.db.outputs.host }}
+          DB_PORT: ${{ steps.db.outputs.port }}
+          DB_DATABASE: ${{ steps.db.outputs.database }}
+          CODEGEN_DB_USERNAME: ${{ steps.db.outputs.username }}
+          CODEGEN_DB_PASSWORD: ${{ steps.db.outputs.password }}
+
+      - name: Install SQL Server tools
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+
+      - name: Run MemberJunction CodeGen
+        run: |
+          echo "=== Running MJ CodeGen to update entities ==="
+          export PATH="$PATH:/opt/mssql-tools18/bin"
+          npx mj codegen
+        env:
+          DB_HOST: ${{ steps.db.outputs.host }}
+          DB_PORT: ${{ steps.db.outputs.port }}
+          DB_DATABASE: ${{ steps.db.outputs.database }}
+          DB_USERNAME: ${{ steps.db.outputs.username }}
+          DB_PASSWORD: ${{ steps.db.outputs.password }}
+          CODEGEN_DB_USERNAME: ${{ steps.db.outputs.username }}
+          CODEGEN_DB_PASSWORD: ${{ steps.db.outputs.password }}
+          MJ_CORE_SCHEMA: __mj
+
+      - name: Commit generated code
+        if: inputs.commit_generated_code != false
+        run: |
+          echo "=== Committing Generated Code ==="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Add generated directories (|| true to avoid failure if dir doesn't exist)
+          git add packages/GeneratedEntities/src/generated/ || true
+          git add packages/GeneratedActions/src/generated/ || true
+          git add apps/MJAPI/src/generated/ || true
+          git add apps/MJExplorer/src/app/generated/ || true
+
+          # Only commit if there are staged changes
+          if git diff --staged --quiet; then
+            echo "No generated code changes to commit"
+          else
+            git commit -m "chore: regenerate entities from schema migration
+
+          Environment: ${{ needs.check-env.outputs.branch_env }}
+
+          [skip ci]"
+            git push
+            echo "✅ Generated code committed and pushed"
+          fi
+
+      - name: Migration Summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "✅ Migration Complete for ${{ needs.check-env.outputs.branch_env }}"
+          echo "=========================================="
+          echo ""
+          echo "✅ Custom schema migrations applied (npm run db)"
+          echo "✅ MemberJunction entities regenerated"
+          if [ "${{ inputs.commit_generated_code }}" == "false" ]; then
+            echo ""
+            echo "ℹ️  Generated code was NOT committed (commit_generated_code=false)"
+          else
+            echo "✅ Generated code committed to repository (if changes detected)"
+          fi
+
+      - name: Trigger Application Redeployments
+        if: success()
+        run: |
+          echo ""
+          echo "==========================================="
+          echo "🔄 Triggering Application Redeployments"
+          echo "==========================================="
+          echo ""
+          echo "CodeGen has regenerated entities. Triggering redeployment of:"
+          echo "  • MJAPI (to use updated entity classes)"
+          echo "  • MJExplorer (to use updated Angular components)"
+          echo ""
+
+          gh workflow run deploy-api.yml --ref ${{ github.ref_name }}
+          gh workflow run deploy-explorer.yml --ref ${{ github.ref_name }}
+
+          echo ""
+          echo "✅ Redeployment workflows triggered"
+          echo "   Check Actions tab for deployment progress"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

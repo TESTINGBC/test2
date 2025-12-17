@@ -1,0 +1,229 @@
+# MemberJunction Database Setup & Update
+# This workflow initializes or updates the MemberJunction core schema (__mj)
+# Use for:
+#   - Initial database setup (new provisioned empty DB)
+#   - MJ version upgrades (after updating @memberjunction/cli in package.json)
+#
+# Note: This does NOT run Flyway migrations - use schema-migration.yml for custom schema changes
+
+name: MJ Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment suffix (e.g., DEV, STAGE, PROD)"
+        required: true
+        type: string
+      commit_generated_code:
+        description: "Commit generated code changes to repository?"
+        type: boolean
+        default: true
+      trigger_deploy:
+        description: "Trigger deployment workflows after setup?"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # Required for committing generated code
+  actions: write   # Required for triggering other workflows
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set environment suffix
+        id: env
+        run: |
+          BRANCH_ENV="${{ inputs.environment }}"
+          echo "BRANCH_ENV=$BRANCH_ENV" >> $GITHUB_OUTPUT
+          echo "Using environment suffix: $BRANCH_ENV"
+
+      - name: Set database connection info
+        id: db
+        run: |
+          # Get individual database secrets provisioned by MJ Central
+          DB_HOST="${{ secrets[format('DB_HOST_{0}', steps.env.outputs.BRANCH_ENV)] }}"
+          DB_DATABASE="${{ secrets[format('DB_DATABASE_{0}', steps.env.outputs.BRANCH_ENV)] }}"
+          DB_USERNAME="${{ secrets[format('DB_USERNAME_{0}', steps.env.outputs.BRANCH_ENV)] }}"
+          DB_PASSWORD="${{ secrets[format('DB_PASSWORD_{0}', steps.env.outputs.BRANCH_ENV)] }}"
+
+          # Validate secrets exist
+          if [ -z "$DB_HOST" ] || [ -z "$DB_DATABASE" ] || [ -z "$DB_USERNAME" ] || [ -z "$DB_PASSWORD" ]; then
+            echo "::error::Missing database secrets for environment ${{ steps.env.outputs.BRANCH_ENV }}"
+            echo "Expected secrets: DB_HOST_${{ steps.env.outputs.BRANCH_ENV }}, DB_DATABASE_${{ steps.env.outputs.BRANCH_ENV }}, DB_USERNAME_${{ steps.env.outputs.BRANCH_ENV }}, DB_PASSWORD_${{ steps.env.outputs.BRANCH_ENV }}"
+            echo "Ensure MJ Central has provisioned this environment"
+            exit 1
+          fi
+
+          echo "Database connection configured"
+          echo "  Host: $DB_HOST"
+          echo "  Database: $DB_DATABASE"
+          echo "  Username: $DB_USERNAME"
+
+          # Mask sensitive values
+          echo "::add-mask::$DB_PASSWORD"
+
+          # Export as outputs for subsequent steps
+          echo "host=$DB_HOST" >> $GITHUB_OUTPUT
+          echo "port=1433" >> $GITHUB_OUTPUT
+          echo "database=$DB_DATABASE" >> $GITHUB_OUTPUT
+          echo "username=$DB_USERNAME" >> $GITHUB_OUTPUT
+          echo "password=$DB_PASSWORD" >> $GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Display MJ CLI version
+        run: |
+          echo "=== MemberJunction CLI Version ==="
+          npx mj --version || echo "Version command not available"
+          echo ""
+          echo "CLI version from package.json:"
+          node -e "console.log(require('./package.json').dependencies['@memberjunction/cli'])"
+
+      - name: Install SQL Server tools
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+
+      - name: Create database logins and users
+        run: |
+          export PATH="$PATH:/opt/mssql-tools18/bin"
+          echo "=== Creating database logins and users ==="
+
+          # Create mjapp login in master database
+          echo "Creating mjapp login in master database..."
+          sqlcmd -S "$DB_HOST,$DB_PORT" -d master -U "$DB_USERNAME" -P "$DB_PASSWORD" \
+            -C -v RUNTIME_DB_PASSWORD="$RUNTIME_DB_PASSWORD" \
+            -i "./SQL Scripts/create_mjapp_login.sql"
+
+          # Create users in target database
+          echo "Creating users in $DB_DATABASE..."
+          sqlcmd -S "$DB_HOST,$DB_PORT" -d "$DB_DATABASE" -U "$DB_USERNAME" -P "$DB_PASSWORD" \
+            -C -i "./SQL Scripts/create_db_users.sql"
+
+          echo "Database logins and users created successfully"
+        env:
+          DB_HOST: ${{ steps.db.outputs.host }}
+          DB_PORT: ${{ steps.db.outputs.port }}
+          DB_DATABASE: ${{ steps.db.outputs.database }}
+          DB_USERNAME: ${{ steps.db.outputs.username }}
+          DB_PASSWORD: ${{ steps.db.outputs.password }}
+          RUNTIME_DB_PASSWORD: ${{ secrets[format('RUNTIME_DB_PASSWORD_{0}', steps.env.outputs.BRANCH_ENV)] }}
+
+      - name: Run MJ Core Migrations
+        run: |
+          echo "=== Running MJ Core Migrations (__mj schema) ==="
+          echo "This will initialize or update the MemberJunction core schema."
+          echo ""
+          # Workaround for MJ CLI mkdtempSync bug (needs prefix, not just directory)
+          export TMPDIR="${RUNNER_TEMP}/mj-"
+          npx mj migrate --tag=main
+        env:
+          DB_HOST: ${{ steps.db.outputs.host }}
+          DB_PORT: ${{ steps.db.outputs.port }}
+          DB_DATABASE: ${{ steps.db.outputs.database }}
+          DB_USERNAME: ${{ steps.db.outputs.username }}
+          DB_PASSWORD: ${{ steps.db.outputs.password }}
+          CODEGEN_DB_USERNAME: ${{ steps.db.outputs.username }}
+          CODEGEN_DB_PASSWORD: ${{ steps.db.outputs.password }}
+          MJ_CORE_SCHEMA: __mj
+
+      - name: Run MemberJunction CodeGen
+        run: |
+          echo "=== Running MJ CodeGen ==="
+          echo "Generating TypeScript entities from database schema..."
+          echo ""
+          export PATH="$PATH:/opt/mssql-tools18/bin"
+          npx mj codegen
+        env:
+          DB_HOST: ${{ steps.db.outputs.host }}
+          DB_PORT: ${{ steps.db.outputs.port }}
+          DB_DATABASE: ${{ steps.db.outputs.database }}
+          DB_USERNAME: ${{ steps.db.outputs.username }}
+          DB_PASSWORD: ${{ steps.db.outputs.password }}
+          CODEGEN_DB_USERNAME: ${{ steps.db.outputs.username }}
+          CODEGEN_DB_PASSWORD: ${{ steps.db.outputs.password }}
+          MJ_CORE_SCHEMA: __mj
+
+      - name: Commit generated code
+        if: inputs.commit_generated_code != false
+        run: |
+          echo "=== Committing Generated Code ==="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Add generated directories
+          git add packages/GeneratedEntities/src/generated/ || true
+          git add packages/GeneratedActions/src/generated/ || true
+          git add apps/MJAPI/src/generated/ || true
+          git add apps/MJExplorer/src/app/generated/ || true
+          git add apps/MJAPI/schema.graphql || true
+
+          # Only commit if there are staged changes
+          if git diff --staged --quiet; then
+            echo "No generated code changes to commit"
+          else
+            git commit -m "chore: regenerate entities after MJ setup
+
+          Environment: ${{ steps.env.outputs.BRANCH_ENV }}
+          MJ CLI Version: $(node -e "console.log(require('./package.json').dependencies['@memberjunction/cli'])")
+
+          [skip ci]"
+            git push
+            echo "Generated code committed and pushed"
+          fi
+
+      - name: Setup Summary
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "MJ Setup Complete for ${{ steps.env.outputs.BRANCH_ENV }}"
+          echo "=========================================="
+          echo ""
+          echo "MJ core migrations applied (npm run migrate)"
+          echo "MemberJunction entities regenerated (npm run codegen)"
+          if [ "${{ inputs.commit_generated_code }}" != "false" ]; then
+            echo "Generated code committed to repository (if changes detected)"
+          else
+            echo ""
+            echo "Generated code was NOT committed (commit_generated_code=false)"
+          fi
+
+      - name: Trigger Application Deployments
+        if: success() && inputs.trigger_deploy == true
+        run: |
+          echo ""
+          echo "==========================================="
+          echo "Triggering Application Deployments"
+          echo "==========================================="
+          echo ""
+          echo "Triggering deployment of:"
+          echo "  - MJAPI (to use updated entity classes)"
+          echo "  - MJExplorer (to use updated Angular components)"
+          echo ""
+
+          gh workflow run deploy-api.yml --ref ${{ github.ref_name }}
+          gh workflow run deploy-explorer.yml --ref ${{ github.ref_name }}
+
+          echo ""
+          echo "Deployment workflows triggered"
+          echo "Check Actions tab for deployment progress"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

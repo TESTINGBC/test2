@@ -1,0 +1,16 @@
+# Flyway Configuration for MemberJunction Template
+# This manages CUSTOM application schema migrations
+# For MJ core schema updates, use: npm run migrate
+
+[environments.default]
+url = "${FLYWAY_URL}"
+user = "${CODEGEN_DB_USERNAME}"
+password = "${CODEGEN_DB_PASSWORD}"
+
+[flyway]
+environment = "default"
+locations = ["filesystem:./SQL Scripts/migrations"]
+baselineOnMigrate = true
+baselineVersion = "0"
+validateOnMigrate = true
+outOfOrder = false

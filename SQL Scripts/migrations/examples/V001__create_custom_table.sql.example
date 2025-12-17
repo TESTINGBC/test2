@@ -1,0 +1,69 @@
+/*
+================================================================================
+Example Custom Table Migration
+================================================================================
+
+This is an EXAMPLE showing how to add custom tables to your MemberJunction app.
+Replace this with your actual custom schema.
+
+IMPORTANT:
+- This file is for CUSTOM application schema (your business tables)
+- For MJ core schema (__mj tables), use: npm run migrate
+- DO NOT modify __mj schema here
+
+After creating tables:
+1. Run: npm run migrate:flyway (to apply this schema change)
+2. Run: npm run codegen (to register new entities in MemberJunction)
+3. Rebuild and restart: npm run build && npm run start:api
+
+For more info, see: SQL Scripts/migrations/README.md
+================================================================================
+*/
+
+-- Example: Creating a custom schema for your application
+-- Uncomment and modify as needed:
+
+-- CREATE SCHEMA myapp;
+-- GO
+
+-- Example: Creating a custom table that MemberJunction will manage
+-- Uncomment and modify as needed:
+
+-- CREATE TABLE myapp.Customer (
+--     -- Primary key (required)
+--     ID UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+--
+--     -- Business fields
+--     Name NVARCHAR(255) NOT NULL,
+--     Email NVARCHAR(255),
+--     Phone NVARCHAR(50),
+--     Status NVARCHAR(50) DEFAULT 'Active',
+--
+--     -- MemberJunction audit fields (DO NOT manually set these!)
+--     -- MJ automatically manages these timestamps
+--     __mj_CreatedAt DATETIMEOFFSET NOT NULL DEFAULT(GETUTCDATE()),
+--     __mj_UpdatedAt DATETIMEOFFSET NOT NULL DEFAULT(GETUTCDATE())
+-- );
+-- GO
+
+-- Example: Add description for MemberJunction metadata
+-- This description appears in the MJ Explorer UI
+-- EXEC sp_addextendedproperty
+--     @name = N'MS_Description',
+--     @value = N'Customer information for our application',
+--     @level0type = N'SCHEMA', @level0name = N'myapp',
+--     @level1type = N'TABLE', @level1name = N'Customer';
+-- GO
+
+-- Example: Add field descriptions
+-- EXEC sp_addextendedproperty
+--     @name = N'MS_Description',
+--     @value = N'Customer email address',
+--     @level0type = N'SCHEMA', @level0name = N'myapp',
+--     @level1type = N'TABLE', @level1name = N'Customer',
+--     @level2type = N'COLUMN', @level2name = N'Email';
+-- GO
+
+-- Placeholder: Remove this when you add actual schema changes
+PRINT 'V001 Example migration - Replace this file with your actual schema changes';
+PRINT 'This migration does nothing until you uncomment the example SQL above';
