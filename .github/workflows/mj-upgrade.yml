@@ -128,8 +128,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Add all package.json files and lock file
-          git add "**/package.json" package-lock.json
+          # Add all package.json files (root + subdirectories) and lock file
+          git add package.json "**/package.json" package-lock.json
 
           # Only commit if there are staged changes
           if git diff --staged --quiet; then
